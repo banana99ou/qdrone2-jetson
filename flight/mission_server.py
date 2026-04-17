@@ -67,16 +67,24 @@ def _unlink(path):
 
 
 def build_packet(arm, takeoff, is_tracking, desired_z, timestamp, buf):
-    """Fill a 16-element float64 buffer matching DroneStack's expected layout."""
+    """Fill a 16-element float64 buffer matching DroneStack's expected layout.
+
+    Layout (16 float64):
+      [0..3]   triggers[4]        [arm, takeoff, estop, joystick_issue]
+      [4]      is_tracking
+      [5..10]  measured_pose[6]   [x, y, z, roll, pitch, yaw] (m, rad)
+      [11..14] desired_pose[4]    [x, y, z, yaw] (m, rad)
+      [15]     timestamp          seconds
+    """
     buf[:] = 0.0
     buf[0]  = float(arm)
     buf[1]  = float(takeoff)
     # buf[2] estop = 0, buf[3] joystick_issue = 0
     buf[4]  = float(is_tracking)
-    # buf[5..10] measured_pose = 0
-    # buf[11..12] desired x,y = 0
+    # measured_pose fixed at origin + level (no real pose source in phase 1):
+    # buf[5..10] = 0 means x=y=z=0, roll=pitch=yaw=0 → "I'm at origin, level"
+    # desired_pose: x=y=yaw=0, z = desired_z
     buf[13] = float(desired_z)
-    # buf[14] desired yaw = 0
     buf[15] = float(timestamp)
 
 
@@ -178,17 +186,17 @@ def main():
         elapsed = now - t0
 
         if args.idle_only:
-            phase, arm, takeoff, dz = "IDLE-ONLY", 0, 0, 0.0
+            phase, arm, takeoff, dz, is_tracking = "IDLE-ONLY", 0, 0, 0.0, 0
         elif elapsed < t_preflight_end:
-            phase, arm, takeoff, dz = "IDLE",   0, 0, 0.0
+            phase, arm, takeoff, dz, is_tracking = "IDLE",   0, 0, 0.0, 0
         elif elapsed < t_arm_end:
-            phase, arm, takeoff, dz = "ARM",    1, 0, 0.0
+            phase, arm, takeoff, dz, is_tracking = "ARM",    1, 0, 0.0, 1
         elif elapsed < t_hover_end:
-            phase, arm, takeoff, dz = "HOVER",  1, 1, args.altitude
+            phase, arm, takeoff, dz, is_tracking = "HOVER",  1, 1, args.altitude, 1
         elif elapsed < t_land_end:
-            phase, arm, takeoff, dz = "LAND",   1, 0, 0.0
+            phase, arm, takeoff, dz, is_tracking = "LAND",   1, 0, 0.0, 1
         elif elapsed < t_total:
-            phase, arm, takeoff, dz = "DISARM", 0, 0, 0.0
+            phase, arm, takeoff, dz, is_tracking = "DISARM", 0, 0, 0.0, 1
         else:
             log("sequence complete")
             break
@@ -197,7 +205,7 @@ def main():
             log(f"-> {phase}")
             last_phase = phase
 
-        build_packet(arm, takeoff, 0, dz, time.time(), send_buf)
+        build_packet(arm, takeoff, is_tracking, dz, time.time(), send_buf)
         try:
             client.send_double_array(send_buf, PACKET_FLOATS)
             client.flush()
@@ -216,7 +224,7 @@ def main():
         if now - last_status >= 1.0:
             last_status = now
             log(f"phase={phase} t={elapsed:5.2f}s arm={arm} takeoff={takeoff} "
-                f"dz={dz:.2f} rx_ts={recv_buf[0]:.3f} rx_ok={rx_ok} rx_err={rx_err}")
+                f"dz={dz:.2f} isT={is_tracking} rx_ts={recv_buf[0]:.3f} rx_ok={rx_ok} rx_err={rx_err}")
 
         next_tick += TICK_DT
         sleep = next_tick - time.monotonic()
