@@ -79,13 +79,61 @@ Source: `Quanser_Academic_Resources/5_research/autonomous_vehicles/qdrone2/pytho
 
 ---
 
-## What's still unknown
+## Port 18001 protocol (decoded — 2026-04-17)
 
-To write the phase-1 server we need the exact byte layouts of the 18001 channel. The `.slx` XML gives us the Stream Client block's port count (3 in / 5 out) but we need to trace which signals connect to those ports. Next static-analysis tasks:
+Settled: **TCP on port 18001**, little-endian float64, no framing beyond what QUARC's Stream Server/Client blocks negotiate internally. (The `.slx` note `tcpip://localhost:18001` vs `q_setup.PORTS["host"]="18002"` conflict is resolved: `q_setup.py` is a Python example override, not a model default. DroneStack's annotation in `system_5768.xml` says `18001` and that's what shipped Mission Server binds. Launch arg `-URI_Host tcpip://<ip>:<port>` wins at runtime; phase 1 uses **18001** matching stock binary.)
 
-1. **Parse `DroneStack/simulink/systems/system_14085.xml`** around SID 17376 (Stream Server at 18491) and SID near the Stream Client to `-URI_Host` — identify the signals wired to each input/output port of the Stream Client block.
-2. **Parse `MissionServerLegacy/simulink/systems/system_4279.xml`** for the mirror side — what the Mission Server sends back to DroneStack on 18001, and what it consumes.
-3. **Cross-reference with `commander.py` and `stream_stack_client_qd2.py`** (Quanser Python) for any hints on buffer sizes and dtypes.
+### Drone → Mission Server (per tick, 8 bytes)
+
+| Offset | Field |
+|---|---|
+| `[0]` | `timestamp` echo — drone loops back element 15 of the last received packet, used by Mission for round-trip measurement |
+
+Source: `DroneStack/simulink/systems/system_5768.xml` SID 2671 — input 1 of Stream Client wired from a Selector that picks index 16 of the received buffer.
+
+### Mission Server → Drone (per tick, 128 bytes = 16 × float64)
+
+Derived from `MissionServerLegacy/simulink/systems/system_root.xml` Mux(5) wiring + Outport Port numbers in `system_4279.xml`:
+
+| Idx | Mux in | Size | Field | Notes |
+|---|---|---|---|---|
+| 0–3 | 1 (Outport SID 4479) | 4 | `triggers[4]` | `[arm, takeoff, estop, joystick_issue]` — ordering inferred from `commander.py` JoystickCommands send payload `[arm, takeoff, Estop, JoystickIssue, mode]`; mode goes to waypoint pipeline, first 4 bits go here |
+| 4 | 2 (Outport SID 4478) | 1 | `is_tracking` | 1 if mocap/VRPN pose valid on the ground-station side |
+| 5–10 | 3 (Outport SID 4477) | 6 | `measured_pose[6]` | inertial frame `[x, y, z, roll, pitch, yaw]` (m, rad) |
+| 11–14 | 4 (Outport SID 4480) | 4 | `desired_pose[4]` | inertial frame `[x, y, z, yaw]` (m, rad) |
+| 15 | 5 (Outport SID 4481) | 1 | `timestamp` | seconds |
+
+### Rate
+
+DroneStack base rate is 500 Hz (`qc_get_step_size`). The Stream Server on port 18001 runs at `qc_get_step_size*2` = **250 Hz** (explicit Rate Transition blocks labeled "slow from 500hz to 250Hz"). Phase-1 server targets ~250 Hz packet rate; nothing terrible happens if we undershoot — Stream Client uses `receive_options="Receive most recent data"` and `send_options="Send most recent data"`, so stale data just means the drone keeps using the last command.
+
+## Library to use
+
+`pal.utilities.stream.BasicStream` is on the drone (`imu_service.py` uses a UDP socket directly, but `pal.products.qdrone2.QDrone2StreamStack` uses `BasicStream` for TCP). It speaks the same framing as DroneStack's Stream Client block. Skeleton:
+
+```python
+from pal.utilities.stream import BasicStream
+import numpy as np
+
+recv_buf = np.zeros(1, dtype=np.float64)
+server = BasicStream(uri='tcpip://0.0.0.0:18001',
+                    agent='S',               # Server
+                    receiveBuffer=recv_buf,
+                    sendBufferSize=2048,
+                    recvBufferSize=2048,
+                    nonBlocking=False)
+# poll until DroneStack connects:
+#   while not server.connected: server.checkConnection(timeout=Timeout(...))
+# then each tick:
+#   server.send(np.array([arm, takeoff, estop, ji, isT, mx,my,mz,mr,mp,mw, dx,dy,dz,dw, ts], dtype=np.float64))
+#   server.receive()   # recv_buf[0] holds drone's timestamp echo
+```
+
+## Remaining unknowns (small, non-blocking for phase 1)
+
+- **Trigger order within `triggers[4]`**: `[arm, takeoff, estop, joystick_issue]` is the working assumption. The receive side in DroneStack has labels `isTracking / Triggers / IF Measured Pose / IF Desired Pose` on Selector 8818 output — consistent with Mux order above. Confirming via the Joystick subsystem trace inside `system_4279.xml` would firm this up but isn't required for hardcoded arm+takeoff.
+- **Level vs edge triggers**: root-annotation instructions say "move Arm toggle to position 2" / "move Takeoff toggle to position 2". **Level-triggered**, held at 1 for duration. Phase 1 holds `arm=1` for the full flight, `takeoff=1` from the moment we want to climb until the moment we want to land, `takeoff=0` to trigger descent (DroneStack handles landing internally).
+- **Safety interlock**: if `is_tracking=0`, DroneStack may refuse to enter position-hold and fall back to attitude-only mode. Phase 1 ignores pose (no VRPN), so we send `is_tracking=0` and all-zero `measured_pose` and `desired_pose`. Whether DroneStack will still arm+takeoff in that degenerate configuration is the **first thing to test on the bench, props off**.
 
 `pal.utilities.stream.BasicStream` is available on the drone and handles the Quanser stream protocol (framing, buffering, connection retries). We can reuse it directly — no need to implement from scratch.
 
