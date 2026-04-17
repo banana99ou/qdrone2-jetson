@@ -1,0 +1,3 @@
+[submodule "planner"]
+	path = planner
+	url = https://git.fmcl.synology.me/jiwoong/drone_integration_simulation.git
