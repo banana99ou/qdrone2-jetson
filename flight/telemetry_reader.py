@@ -44,17 +44,26 @@ def main():
     ap.add_argument("--duration", type=float, default=30.0)
     ap.add_argument("--rate", type=float, default=2.0,
                     help="status print rate [Hz]")
+    ap.add_argument("--connect-timeout", type=float, default=20.0,
+                    help="seconds to keep retrying connect before giving up")
     args = ap.parse_args()
 
     send_buf = np.zeros(1, dtype=np.float64)
     recv_buf = np.zeros(PACKET_SIZE, dtype=np.float64)
 
     client = Stream()
-    try:
-        # blocking connect so we retry until DroneStack is up
-        client.connect(args.uri, False, 2048, 2048)
-    except Exception as e:
-        print(f"[tel] connect failed: {e}", flush=True)
+    connect_deadline = time.monotonic() + args.connect_timeout
+    connected = False
+    while time.monotonic() < connect_deadline:
+        try:
+            client.connect(args.uri, False, 2048, 2048)
+            connected = True
+            break
+        except Exception as e:
+            time.sleep(0.2)  # retry every 200ms
+    if not connected:
+        print(f"[tel] could not connect to {args.uri} within {args.connect_timeout}s",
+              flush=True)
         return 1
 
     print(f"[tel] connected to {args.uri}", flush=True)
