@@ -361,6 +361,8 @@ def cmd_mission(args):
             cmd += ["--port", str(args.port)]
         if args.idle_only:
             cmd += ["--idle-only"]
+        if args.connect_timeout is not None:
+            cmd += ["--connect-timeout", str(args.connect_timeout)]
         _start_bg("mission", cmd)
     elif args.action == "stop":
         _stop_bg("mission")
@@ -431,6 +433,8 @@ def build_parser():
     pm.add_argument("--port", type=int, help=f"TCP port (default {MISSION_PORT}) (start only)")
     pm.add_argument("--idle-only", action="store_true",
                     help="handshake test: stay IDLE forever, no arm (start only)")
+    pm.add_argument("--connect-timeout", type=float,
+                    help="seconds to wait for DroneStack to connect (start only)")
     pm.set_defaults(func=cmd_mission)
 
     sub.add_parser("planner", help="path planner (stub)").set_defaults(func=cmd_planner)
