@@ -359,6 +359,8 @@ def cmd_mission(args):
             cmd += ["--hover", str(args.hover)]
         if args.port is not None:
             cmd += ["--port", str(args.port)]
+        if args.idle_only:
+            cmd += ["--idle-only"]
         _start_bg("mission", cmd)
     elif args.action == "stop":
         _stop_bg("mission")
@@ -427,6 +429,8 @@ def build_parser():
     pm.add_argument("--altitude", type=float, help="hover altitude [m] (start only)")
     pm.add_argument("--hover", type=float, help="hover duration [s] (start only)")
     pm.add_argument("--port", type=int, help=f"TCP port (default {MISSION_PORT}) (start only)")
+    pm.add_argument("--idle-only", action="store_true",
+                    help="handshake test: stay IDLE forever, no arm (start only)")
     pm.set_defaults(func=cmd_mission)
 
     sub.add_parser("planner", help="path planner (stub)").set_defaults(func=cmd_planner)

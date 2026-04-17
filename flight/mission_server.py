@@ -115,6 +115,9 @@ def main():
     ap.add_argument("--land-hold", type=float, default=5.0,
                     help="seconds with arm=1 takeoff=0 for descent")
     ap.add_argument("--connect-timeout", type=float, default=30.0)
+    ap.add_argument("--idle-only", action="store_true",
+                    help="handshake test: stay in IDLE forever, never arm. "
+                         "Motors will not spin. Ctrl-C to exit.")
     args = ap.parse_args()
 
     PID_DIR.mkdir(exist_ok=True)
@@ -174,7 +177,9 @@ def main():
         now = time.monotonic()
         elapsed = now - t0
 
-        if elapsed < t_preflight_end:
+        if args.idle_only:
+            phase, arm, takeoff, dz = "IDLE-ONLY", 0, 0, 0.0
+        elif elapsed < t_preflight_end:
             phase, arm, takeoff, dz = "IDLE",   0, 0, 0.0
         elif elapsed < t_arm_end:
             phase, arm, takeoff, dz = "ARM",    1, 0, 0.0
