@@ -25,6 +25,9 @@ Running this server alone does NOT spin motors. The drone's stabilizer
 binary must be launched separately via `drone.py hw run QD2_DroneStack_PID_2021a`.
 If DroneStack is not running, this script binds the port and waits until
 --connect-timeout (default 30 s).
+
+Uses quanser.communications.Stream directly; pal.utilities.stream is not
+installed on this drone image.
 """
 import argparse
 import os
@@ -36,7 +39,7 @@ from pathlib import Path
 import numpy as np
 
 try:
-    from pal.utilities.stream import BasicStream
+    from quanser.communications import Stream, PollFlag
     from quanser.common import Timeout
 except ImportError as e:
     print(f"[mission] missing Quanser python API: {e}", flush=True)
@@ -52,33 +55,50 @@ TICK_DT = 1.0 / TICK_HZ
 PACKET_FLOATS = 16
 
 
-def build_packet(arm, takeoff, is_tracking, desired_z, timestamp):
-    pkt = np.zeros(PACKET_FLOATS, dtype=np.float64)
-    pkt[0] = float(arm)
-    pkt[1] = float(takeoff)
-    # pkt[2] estop = 0, pkt[3] joystick_issue = 0
-    pkt[4] = float(is_tracking)
-    # pkt[5..10] measured_pose = 0
-    # pkt[11..13] desired_pose x,y = 0
-    pkt[13] = float(desired_z)
-    # pkt[14] desired yaw = 0
-    pkt[15] = float(timestamp)
-    return pkt
-
-
 def log(msg):
     print(f"[mission {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def _cleanup(server):
+def _unlink(path):
     try:
-        server.terminate()
-    except Exception:
-        pass
-    try:
-        PID_FILE.unlink()
+        path.unlink()
     except FileNotFoundError:
         pass
+
+
+def build_packet(arm, takeoff, is_tracking, desired_z, timestamp, buf):
+    """Fill a 16-element float64 buffer matching DroneStack's expected layout."""
+    buf[:] = 0.0
+    buf[0]  = float(arm)
+    buf[1]  = float(takeoff)
+    # buf[2] estop = 0, buf[3] joystick_issue = 0
+    buf[4]  = float(is_tracking)
+    # buf[5..10] measured_pose = 0
+    # buf[11..12] desired x,y = 0
+    buf[13] = float(desired_z)
+    # buf[14] desired yaw = 0
+    buf[15] = float(timestamp)
+
+
+def wait_for_client(server, stop, deadline):
+    """Poll for an incoming connection until deadline or stop. Return accepted
+    client Stream, or None on timeout/stop."""
+    poll_to = Timeout(seconds=0, nanoseconds=10_000_000)  # 10 ms
+    while not stop[0]:
+        try:
+            # poll() returns the subset of requested flags that are ready
+            ready = server.poll(poll_to, PollFlag.ACCEPT)
+            if ready & PollFlag.ACCEPT:
+                client = server.accept(2048, 2048)
+                if client is not None:
+                    return client
+        except Exception as e:
+            # non-fatal; typically WOULD_BLOCK variants in non-blocking mode
+            pass
+        if time.monotonic() > deadline:
+            return None
+        time.sleep(0.01)
+    return None
 
 
 def main():
@@ -105,36 +125,37 @@ def main():
     signal.signal(signal.SIGINT,  lambda *_: stop.__setitem__(0, True))
 
     uri = f"tcpip://0.0.0.0:{args.port}"
-    recv_buf = np.zeros(1, dtype=np.float64)
-    server = BasicStream(uri=uri,
-                         agent="S",
-                         receiveBuffer=recv_buf,
-                         sendBufferSize=2048,
-                         recvBufferSize=2048,
-                         nonBlocking=True)
+    server = Stream()
+    try:
+        server.listen(uri, True)  # non-blocking
+    except Exception as e:
+        log(f"listen on {uri} failed: {e}")
+        _unlink(PID_FILE)
+        return 1
 
     log(f"listening on {uri}")
     log(f"plan: idle {args.preflight:.1f}s -> arm {args.arm_hold:.1f}s -> "
         f"hover {args.hover:.1f}s @ z={args.altitude}m -> land {args.land_hold:.1f}s -> disarm")
 
-    poll_to = Timeout(seconds=0, nanoseconds=1_000_000)
-    connect_deadline = time.monotonic() + args.connect_timeout
-    while not server.connected and not stop[0]:
-        server.checkConnection(timeout=poll_to)
-        if server.connected:
-            break
-        if time.monotonic() > connect_deadline:
-            log("no client connected within timeout, exiting")
-            _cleanup(server)
-            return 1
-        time.sleep(0.05)
-
-    if stop[0]:
-        log("stop signal before connection; exiting clean")
-        _cleanup(server)
-        return 0
+    deadline = time.monotonic() + args.connect_timeout
+    client = wait_for_client(server, stop, deadline)
+    if client is None:
+        if stop[0]:
+            log("stop signal before client connected; exiting clean")
+            rc = 0
+        else:
+            log(f"no client connected within {args.connect_timeout}s; exiting")
+            rc = 1
+        try: server.close()
+        except Exception: pass
+        _unlink(PID_FILE)
+        return rc
 
     log("drone connected, entering sequence")
+
+    send_buf = np.zeros(PACKET_FLOATS, dtype=np.float64)
+    recv_buf = np.zeros(1, dtype=np.float64)
+    recv_poll_to = Timeout(seconds=0, nanoseconds=100_000)  # 100 us
 
     t_preflight_end = args.preflight
     t_arm_end       = t_preflight_end + args.arm_hold
@@ -146,6 +167,8 @@ def main():
     next_tick = t0
     last_status = 0.0
     last_phase = None
+    rx_ok = 0
+    rx_err = 0
 
     while not stop[0]:
         now = time.monotonic()
@@ -169,35 +192,51 @@ def main():
             log(f"-> {phase}")
             last_phase = phase
 
-        pkt = build_packet(arm, takeoff, 0, dz, time.time())
+        build_packet(arm, takeoff, 0, dz, time.time(), send_buf)
         try:
-            server.send(pkt)
-            server.receive(timeout=poll_to, iterations=1)
+            client.send_double_array(send_buf, PACKET_FLOATS)
+            client.flush()
         except Exception as e:
-            log(f"stream err (phase={phase}): {e}")
+            log(f"send err (phase={phase}): {e}")
+
+        # non-blocking receive
+        try:
+            rdy = client.poll(recv_poll_to, PollFlag.RECEIVE)
+            if rdy & PollFlag.RECEIVE:
+                client.receive_double_array(recv_buf, 1)
+                rx_ok += 1
+        except Exception:
+            rx_err += 1
 
         if now - last_status >= 1.0:
             last_status = now
-            log(f"phase={phase} t={elapsed:5.2f}s  arm={arm} takeoff={takeoff} "
-                f"dz={dz:.2f}  rx_ts={recv_buf[0]:.3f}")
+            log(f"phase={phase} t={elapsed:5.2f}s arm={arm} takeoff={takeoff} "
+                f"dz={dz:.2f} rx_ts={recv_buf[0]:.3f} rx_ok={rx_ok} rx_err={rx_err}")
 
         next_tick += TICK_DT
         sleep = next_tick - time.monotonic()
         if sleep > 0:
             time.sleep(sleep)
         else:
-            next_tick = time.monotonic()
+            next_tick = time.monotonic()  # drifted — reset baseline
 
     log("exiting, sending disarm tail")
-    zeros = build_packet(0, 0, 0, 0.0, time.time())
+    build_packet(0, 0, 0, 0.0, time.time(), send_buf)
     for _ in range(50):
         try:
-            server.send(zeros)
+            client.send_double_array(send_buf, PACKET_FLOATS)
+            client.flush()
         except Exception:
             pass
         time.sleep(TICK_DT)
 
-    _cleanup(server)
+    try: client.shutdown()
+    except Exception: pass
+    try: client.close()
+    except Exception: pass
+    try: server.close()
+    except Exception: pass
+    _unlink(PID_FILE)
     return 0
 
 
