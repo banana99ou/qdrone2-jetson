@@ -34,6 +34,8 @@ LOG_DIR.mkdir(exist_ok=True)
 STREAMER_SCRIPT = ROOT / "cam_stream.py"
 STREAMER_PORT = 8080
 IMU_SCRIPT = ROOT / "imu_service.py"
+MISSION_SCRIPT = ROOT / "flight" / "mission_server.py"
+MISSION_PORT = 18001
 SIM_BIN = ROOT / "planner" / "Simulation" / "C++" / "drone_sim"
 SIM_CONFIG = ROOT / "planner" / "Simulation" / "C++" / "config.jsonc"
 SIM_DISPLAY = ":0"
@@ -342,6 +344,31 @@ def cmd_sim(args):
         _tail_log("sim", n=args.n, follow=args.follow)
 
 
+# ---- mission (phase-1 Python mission server on TCP 18001) -----------------
+#
+# Binds a TCP Stream Server that DroneStack dials into. Running this alone is
+# safe (no HIL access, no motors) — it just serves a protocol. The stabilizer
+# binary must be launched separately via `drone.py hw run QD2_DroneStack_PID_2021a`
+# for anything to actually move.
+def cmd_mission(args):
+    if args.action == "start":
+        cmd = [sys.executable, str(MISSION_SCRIPT)]
+        if args.altitude is not None:
+            cmd += ["--altitude", str(args.altitude)]
+        if args.hover is not None:
+            cmd += ["--hover", str(args.hover)]
+        if args.port is not None:
+            cmd += ["--port", str(args.port)]
+        _start_bg("mission", cmd)
+    elif args.action == "stop":
+        _stop_bg("mission")
+    elif args.action == "status":
+        pid = _running_pid("mission")
+        print(f"mission : {'running pid '+str(pid) if pid else 'stopped'}")
+    elif args.action == "logs":
+        _tail_log("mission", n=args.n, follow=args.follow)
+
+
 # ---- planner / controller stubs (to be filled when C++ port lands) --------
 def cmd_planner(args):
     print("(planner: not yet ported — will live in ./planner/)")
@@ -392,6 +419,15 @@ def build_parser():
     ps.add_argument("-n", type=int, default=50, help="log lines (logs action)")
     ps.add_argument("-f", "--follow", action="store_true", help="follow log")
     ps.set_defaults(func=cmd_sim)
+
+    pm = sub.add_parser("mission", help="phase-1 mission server on TCP 18001 (safe alone)")
+    pm.add_argument("action", choices=["start", "stop", "status", "logs"])
+    pm.add_argument("-n", type=int, default=50, help="log lines (logs action)")
+    pm.add_argument("-f", "--follow", action="store_true", help="follow log")
+    pm.add_argument("--altitude", type=float, help="hover altitude [m] (start only)")
+    pm.add_argument("--hover", type=float, help="hover duration [s] (start only)")
+    pm.add_argument("--port", type=int, help=f"TCP port (default {MISSION_PORT}) (start only)")
+    pm.set_defaults(func=cmd_mission)
 
     sub.add_parser("planner", help="path planner (stub)").set_defaults(func=cmd_planner)
     sub.add_parser("control", help="flight controller (stub)").set_defaults(func=cmd_control)
