@@ -1,8 +1,14 @@
-# Phase-1 Session Journal — honest status after ~half a day
+# Development Journal
 
-_2026-04-17. QDrone 2 at 192.168.0.169. Props off throughout._
+Newest entries at the top. Each entry = one working session. Keep it honest — "did not work, here's what we saw" beats optimistic summaries.
 
-## 1. Existing drone control infrastructure (what was already there)
+---
+
+## 2026-04-17 — Phase-1 bench-test attempt (NOT complete)
+
+_Half-day session. QDrone 2 at 192.168.0.169. Props off throughout._
+
+### 1. Existing drone control infrastructure (what was already there)
 
 **Hardware/OS**
 - Jetson-based QDrone 2, L4T R32.7.3 aarch64, hostname `qdrone-54334`
